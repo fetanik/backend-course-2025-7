@@ -1,0 +1,34 @@
+services:
+  app:
+    build: .
+    container_name: backend-course-2025-7-app
+    env_file:
+      - .env
+    command: >
+      sh -c "npx nodemon main.js -- 
+      -h $HOST
+      -p $PORT
+      -c $CACHE_DIR"
+    volumes:
+      - .:/app
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      - db
+
+  db:
+    image: mysql:8.0
+    container_name: backend-course-2025-7-db
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+volumes:
+  db-data:
