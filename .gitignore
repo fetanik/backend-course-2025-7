@@ -1,1 +1,6 @@
 .env
+node_modules/
+cache/
+db-data/
+.DS_Store
+test.jpg.jpg
