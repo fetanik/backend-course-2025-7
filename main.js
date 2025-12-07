@@ -1,5 +1,5 @@
-require('dotenv').config();
-const mysql = require('mysql2/promise');
+require('dotenv').config(); 
+const mysql = require('mysql2');
 
 const { Command } = require('commander');
 const fs = require('fs');
@@ -18,6 +18,8 @@ program
 
 program.parse(process.argv);
 const options = program.opts();
+
+// створюємо папку кешу, якщо її ще нема
 if (!fs.existsSync(options.cache)) {
   fs.mkdirSync(options.cache, { recursive: true });
 }
@@ -26,6 +28,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+// підключення до MySQL
 const dbPool = mysql.createPool({
   host: process.env.DB_HOST || 'db',
   port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3306,
@@ -37,9 +40,10 @@ const dbPool = mysql.createPool({
   queueLimit: 0,
 });
 
+// завантаження фото у кеш
 const upload = multer({ dest: options.cache });
 
-// Допоміжна функція для формування відповіді
+// функція для відповідей 
 function itemToDto(item) {
   const photoFilename = item.photoFilename || item.photo_filename || null;
 
@@ -79,7 +83,7 @@ const swaggerOptions = {
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// Обмеження методів (405)
+// 405 для заборонених методів
 app.all('/register', (req, res, next) => {
   if (req.method === 'POST') return next();
   res.sendStatus(405);
@@ -96,13 +100,12 @@ app.all('/inventory/:id/photo', (req, res, next) => {
   if (['GET', 'PUT'].includes(req.method)) return next();
   res.sendStatus(405);
 });
-// ТЕПЕР /search дозволяє тільки POST (як у методичці)
 app.all('/search', (req, res, next) => {
   if (req.method === 'POST') return next();
   res.sendStatus(405);
 });
 
-// Статичні HTML-сторінки (форми)
+// HTML-форми
 app.get('/RegisterForm.html', (req, res) => {
   res.sendFile(path.resolve(__dirname, 'RegisterForm.html'));
 });
@@ -125,16 +128,17 @@ app.get('/SearchForm.html', (req, res) => {
  *               items:
  *                 $ref: '#/components/schemas/InventoryItem'
  */
-app.get('/inventory', async (req, res) => {
-  try {
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory ORDER BY id'
-    );
-    res.json(rows.map(itemToDto));
-  } catch (err) {
-    console.error('GET /inventory error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
+app.get('/inventory', (req, res) => {
+  dbPool.query(
+    'SELECT id, inventory_name, description, photo_filename FROM inventory ORDER BY id',
+    (err, rows) => {
+      if (err) {
+        console.error('GET /inventory error:', err);
+        return res.status(500).json({ error: 'internal error' });
+      }
+      res.json(rows.map(itemToDto));
+    }
+  );
 });
 
 /**
@@ -158,27 +162,28 @@ app.get('/inventory', async (req, res) => {
  *       404:
  *         description: Not found
  */
-app.get('/inventory/:id', async (req, res) => {
+app.get('/inventory/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) {
     return res.status(400).json({ error: 'invalid id' });
   }
 
-  try {
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
+  dbPool.query(
+    'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+    [id],
+    (err, rows) => {
+      if (err) {
+        console.error('GET /inventory/:id error:', err);
+        return res.status(500).json({ error: 'internal error' });
+      }
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'not found' });
+      if (!rows.length) {
+        return res.status(404).json({ error: 'not found' });
+      }
+
+      res.json(itemToDto(rows[0]));
     }
-
-    res.json(itemToDto(rows[0]));
-  } catch (err) {
-    console.error('GET /inventory/:id error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
+  );
 });
 
 /**
@@ -213,7 +218,7 @@ app.get('/inventory/:id', async (req, res) => {
  *       404:
  *         description: Not found
  */
-app.put('/inventory/:id', async (req, res) => {
+app.put('/inventory/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) {
     return res.status(400).json({ error: 'invalid id' });
@@ -221,41 +226,54 @@ app.put('/inventory/:id', async (req, res) => {
 
   const { inventory_name, description } = req.body;
 
-  try {
-    // перевіряємо чи існує запис
-    const [existing] = await dbPool.query(
-      'SELECT id FROM inventory WHERE id = ?',
-      [id]
-    );
+  // перевіряємо чи такий запис існує
+  dbPool.query(
+    'SELECT id FROM inventory WHERE id = ?',
+    [id],
+    (err, existing) => {
+      if (err) {
+        console.error('PUT /inventory/:id check error:', err);
+        return res.status(500).json({ error: 'internal error' });
+      }
 
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'not found' });
+      if (!existing.length) {
+        return res.status(404).json({ error: 'not found' });
+      }
+
+      // оновлюємо тільки те що прийшло в body
+      dbPool.query(
+        `UPDATE inventory
+         SET inventory_name = COALESCE(?, inventory_name),
+             description    = COALESCE(?, description)
+         WHERE id = ?`,
+        [
+          typeof inventory_name === 'string' ? inventory_name : null,
+          typeof description === 'string' ? description : null,
+          id,
+        ],
+        (err2) => {
+          if (err2) {
+            console.error('PUT /inventory/:id update error:', err2);
+            return res.status(500).json({ error: 'internal error' });
+          }
+
+          // повертаємо актуальні дані
+          dbPool.query(
+            'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+            [id],
+            (err3, rows) => {
+              if (err3) {
+                console.error('PUT /inventory/:id select error:', err3);
+                return res.status(500).json({ error: 'internal error' });
+              }
+
+              res.json(itemToDto(rows[0]));
+            }
+          );
+        }
+      );
     }
-
-    // оновлюємо тільки те що прийшло
-    await dbPool.query(
-      `UPDATE inventory
-       SET inventory_name = COALESCE(?, inventory_name),
-           description    = COALESCE(?, description)
-       WHERE id = ?`,
-      [
-        typeof inventory_name === 'string' ? inventory_name : null,
-        typeof description === 'string' ? description : null,
-        id,
-      ]
-    );
-
-    // повертаємо оновлений запис
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
-
-    res.json(itemToDto(rows[0]));
-  } catch (err) {
-    console.error('PUT /inventory/:id error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
+  );
 });
 
 /**
@@ -280,35 +298,36 @@ app.put('/inventory/:id', async (req, res) => {
  *       404:
  *         description: Photo not found
  */
-app.get('/inventory/:id/photo', async (req, res) => {
+app.get('/inventory/:id/photo', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) {
     return res.status(400).json({ error: 'invalid id' });
   }
 
-  try {
-    const [rows] = await dbPool.query(
-      'SELECT photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
+  dbPool.query(
+    'SELECT photo_filename FROM inventory WHERE id = ?',
+    [id],
+    (err, rows) => {
+      if (err) {
+        console.error('GET /inventory/:id/photo error:', err);
+        return res.status(500).json({ error: 'internal error' });
+      }
 
-    if (rows.length === 0 || !rows[0].photo_filename) {
-      return res.status(404).json({ error: 'photo not found' });
+      if (!rows.length || !rows[0].photo_filename) {
+        return res.status(404).json({ error: 'photo not found' });
+      }
+
+      const photoFilename = rows[0].photo_filename;
+      const filePath = path.resolve(options.cache, photoFilename);
+
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'photo not found' });
+      }
+
+      res.setHeader('Content-Type', 'image/jpeg');
+      fs.createReadStream(filePath).pipe(res);
     }
-
-    const photoFilename = rows[0].photo_filename;
-    const filePath = path.resolve(options.cache, photoFilename);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'photo not found' });
-    }
-
-    res.setHeader('Content-Type', 'image/jpeg');
-    fs.createReadStream(filePath).pipe(res);
-  } catch (err) {
-    console.error('GET /inventory/:id/photo error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
+  );
 });
 
 /**
@@ -342,8 +361,9 @@ app.get('/inventory/:id/photo', async (req, res) => {
  *       404:
  *         description: Not found
  */
-app.put('/inventory/:id/photo', upload.single('photo'), async (req, res) => {
+app.put('/inventory/:id/photo', upload.single('photo'), (req, res) => {
   const id = parseInt(req.params.id, 10);
+
   if (Number.isNaN(id)) {
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'invalid id' });
@@ -353,46 +373,62 @@ app.put('/inventory/:id/photo', upload.single('photo'), async (req, res) => {
     return res.status(400).json({ error: 'photo file is required' });
   }
 
-  try {
-    // дістаємо поточний запис + старе фото
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
-
-    if (rows.length === 0) {
-      fs.unlink(req.file.path, () => {});
-      return res.status(404).json({ error: 'not found' });
-    }
-    const item = rows[0];
-
-    // видаляємо старий файл фото, якщо був
-    if (item.photo_filename) {
-      const oldPath = path.join(options.cache, item.photo_filename);
-      if (fs.existsSync(oldPath)) {
-        fs.unlink(oldPath, () => {});
+  //  дістаємо item, щоб знати старе фото
+  dbPool.query(
+    'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+    [id],
+    (err, rows) => {
+      if (err) {
+        console.error('PUT /inventory/:id/photo select error:', err);
+        fs.unlink(req.file.path, () => {});
+        return res.status(500).json({ error: 'internal error' });
       }
+
+      if (!rows.length) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(404).json({ error: 'not found' });
+      }
+
+      const item = rows[0];
+
+      //  якщо було старе фото то пробуємо видалити файл
+      if (item.photo_filename) {
+        const oldPath = path.join(options.cache, item.photo_filename);
+        if (fs.existsSync(oldPath)) {
+          fs.unlink(oldPath, () => {});
+        }
+      }
+
+      const newPhotoFilename = path.basename(req.file.path);
+
+      //  записуємо нове ім'я фото в БД
+      dbPool.query(
+        'UPDATE inventory SET photo_filename = ? WHERE id = ?',
+        [newPhotoFilename, id],
+        (err2) => {
+          if (err2) {
+            console.error('PUT /inventory/:id/photo update error:', err2);
+            fs.unlink(req.file.path, () => {});
+            return res.status(500).json({ error: 'internal error' });
+          }
+
+          //  повертаємо оновлений item
+          dbPool.query(
+            'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+            [id],
+            (err3, updatedRows) => {
+              if (err3) {
+                console.error('PUT /inventory/:id/photo reselect error:', err3);
+                return res.status(500).json({ error: 'internal error' });
+              }
+
+              res.json(itemToDto(updatedRows[0]));
+            }
+          );
+        }
+      );
     }
-    const newPhotoFilename = path.basename(req.file.path);
-
-    // оновлюємо БД
-    await dbPool.query(
-      'UPDATE inventory SET photo_filename = ? WHERE id = ?',
-      [newPhotoFilename, id]
-    );
-
-    // повертаємо оновлений запис
-    const [updatedRows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
-
-    res.json(itemToDto(updatedRows[0]));
-  } catch (err) {
-    console.error('PUT /inventory/:id/photo error:', err);
-    if (req.file) fs.unlink(req.file.path, () => {});
-    res.status(500).json({ error: 'internal error' });
-  }
+  );
 });
 
 /**
@@ -421,64 +457,66 @@ app.put('/inventory/:id/photo', upload.single('photo'), async (req, res) => {
  *       404:
  *         description: Item not found
  */
-app.post('/search', async (req, res) => {
+app.post('/search', (req, res) => {
   const id = parseInt(req.body.id, 10);
   if (Number.isNaN(id)) {
     return res.status(400).send('Invalid id');
   }
 
-  try {
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).send('Item not found');
-    }
-
-    const item = rows[0];
-
-    let description = item.description || '';
-    let photoBlock = '';
-
-    if (req.body.has_photo !== undefined && item.photo_filename) {
-      const photoUrl = `/inventory/${item.id}/photo`;
-      if (description) {
-        description += '<br>';
+  dbPool.query(
+    'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+    [id],
+    (err, rows) => {
+      if (err) {
+        console.error('POST /search error:', err);
+        return res.status(500).send('Internal error');
       }
-      description += `Photo link: <a href="${photoUrl}">${photoUrl}</a>`;
 
-      photoBlock = `
-        <p>
-          <img src="${photoUrl}"
-               alt="photo of ${item.inventory_name}"
-               style="max-width:300px;">
-        </p>
-      `;
+      if (!rows.length) {
+        return res.status(404).send('Item not found');
+      }
+
+      const item = rows[0];
+
+      let description = item.description || '';
+      let photoBlock = '';
+
+      // якщо у формі поставили checkbox і фото є
+      if (req.body.has_photo !== undefined && item.photo_filename) {
+        const photoUrl = `/inventory/${item.id}/photo`;
+        if (description) {
+          description += '<br>';
+        }
+        description += `Photo link: <a href="${photoUrl}">${photoUrl}</a>`;
+
+        photoBlock = `
+          <p>
+            <img src="${photoUrl}"
+                 alt="photo of ${item.inventory_name}"
+                 style="max-width:300px;">
+          </p>
+        `;
+      }
+
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Search result</title>
+        </head>
+        <body>
+          <h1>Search result</h1>
+          <p><strong>ID:</strong> ${item.id}</p>
+          <p><strong>Name:</strong> ${item.inventory_name}</p>
+          <p><strong>Description:</strong><br>${description}</p>
+          ${photoBlock}
+          <p><a href="/SearchForm.html">Back to search</a></p>
+        </body>
+        </html>
+      `);
     }
-
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Search result</title>
-      </head>
-      <body>
-        <h1>Search result</h1>
-        <p><strong>ID:</strong> ${item.id}</p>
-        <p><strong>Name:</strong> ${item.inventory_name}</p>
-        <p><strong>Description:</strong><br>${description}</p>
-        ${photoBlock}
-        <p><a href="/SearchForm.html">Back to search</a></p>
-      </body>
-      </html>
-    `);
-  } catch (err) {
-    console.error('POST /search error:', err);
-    res.status(500).send('Internal error');
-  }
+  );
 });
 
 /**
@@ -512,41 +550,45 @@ app.post('/search', async (req, res) => {
  *       400:
  *         description: Bad request
  */
-app.post('/register', upload.single('photo'), async (req, res) => {
+app.post('/register', upload.single('photo'), (req, res) => {
   const name = req.body.inventory_name;
   const description = req.body.description || '';
 
   if (!name || name.trim() === '') {
-    if (req.file) {
-      fs.unlink(req.file.path, () => {});
-    }
+    if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({ error: 'inventory_name is required' });
   }
 
   const photoFilename = req.file ? path.basename(req.file.path) : null;
 
-  try {
-    const [result] = await dbPool.query(
-      `INSERT INTO inventory (inventory_name, description, photo_filename)
-       VALUES (?, ?, ?)`,
-      [name.trim(), description, photoFilename]
-    );
+  dbPool.query(
+    `INSERT INTO inventory (inventory_name, description, photo_filename)
+     VALUES (?, ?, ?)`,
+    [name.trim(), description, photoFilename],
+    (err, result) => {
+      if (err) {
+        console.error('POST /register error:', err);
+        if (req.file) fs.unlink(req.file.path, () => {});
+        return res.status(500).json({ error: 'internal error' });
+      }
 
-    const insertedId = result.insertId;
+      const insertedId = result.insertId;
 
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [insertedId]
-    );
+      // повертаємо щойно створений запис
+      dbPool.query(
+        'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+        [insertedId],
+        (err2, rows) => {
+          if (err2) {
+            console.error('POST /register select error:', err2);
+            return res.status(500).json({ error: 'internal error' });
+          }
 
-    res.status(201).json(itemToDto(rows[0]));
-  } catch (err) {
-    console.error('POST /register error:', err);
-    if (req.file) {
-      fs.unlink(req.file.path, () => {});
+          res.status(201).json(itemToDto(rows[0]));
+        }
+      );
     }
-    res.status(500).json({ error: 'internal error' });
-  }
+  );
 });
 
 /**
@@ -570,42 +612,53 @@ app.post('/register', upload.single('photo'), async (req, res) => {
  *       404:
  *         description: Not found
  */
-app.delete('/inventory/:id', async (req, res) => {
+app.delete('/inventory/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) {
     return res.status(400).json({ error: 'invalid id' });
   }
 
-  try {
-    // витягуємо запис перед видаленням (щоб повернути його у відповіді)
-    const [rows] = await dbPool.query(
-      'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
-      [id]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'not found' });
-    }
-
-    const item = rows[0];
-
-    // видаляємо запис з БД
-    await dbPool.query('DELETE FROM inventory WHERE id = ?', [id]);
-
-    // опціонально видаляємо файл фото з кешу
-    if (item.photo_filename) {
-      const filePath = path.join(options.cache, item.photo_filename);
-      if (fs.existsSync(filePath)) {
-        fs.unlink(filePath, () => {});
+  //  беремо item перед видаленням
+  dbPool.query(
+    'SELECT id, inventory_name, description, photo_filename FROM inventory WHERE id = ?',
+    [id],
+    (err, rows) => {
+      if (err) {
+        console.error('DELETE /inventory/:id select error:', err);
+        return res.status(500).json({ error: 'internal error' });
       }
-    }
 
-    res.json(itemToDto(item));
-  } catch (err) {
-    console.error('DELETE /inventory/:id error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
+      if (!rows.length) {
+        return res.status(404).json({ error: 'not found' });
+      }
+
+      const item = rows[0];
+
+      // видаляємо з БД
+      dbPool.query(
+        'DELETE FROM inventory WHERE id = ?',
+        [id],
+        (err2) => {
+          if (err2) {
+            console.error('DELETE /inventory/:id delete error:', err2);
+            return res.status(500).json({ error: 'internal error' });
+          }
+
+          //  видаляємо файл фото з кешу (якщо є)
+          if (item.photo_filename) {
+            const filePath = path.join(options.cache, item.photo_filename);
+            if (fs.existsSync(filePath)) {
+              fs.unlink(filePath, () => {});
+            }
+          }
+
+          res.json(itemToDto(item));
+        }
+      );
+    }
+  );
 });
+
 
 const server = http.createServer(app);
 server.listen(options.port, options.host, () => {
