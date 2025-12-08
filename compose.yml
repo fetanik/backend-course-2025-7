@@ -4,15 +4,20 @@ services:
     container_name: backend-course-2025-7-app
     env_file:
       - .env
+
     command: >
-      sh -c "npx nodemon main.js -- 
+      sh -c "npx nodemon
+      --exec 'node --inspect=0.0.0.0:9229'
+      main.js --
       -h $HOST
       -p $PORT
       -c $CACHE_DIR"
     volumes:
       - .:/app
+      - /app/node_modules
     ports:
       - "${PORT:-3000}:3000"
+      - "9229:9229"
     depends_on:
       - db
 
